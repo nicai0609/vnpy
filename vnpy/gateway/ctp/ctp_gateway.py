@@ -131,12 +131,15 @@ class CtpGateway(BaseGateway):
         "交易服务器": "",
         "行情服务器": "",
         "产品名称": "",
-        "授权编码": ""
+        "授权编码": "",
+        "产品信息": ""
     }
 
+    exchanges = list(EXCHANGE_CTP2VT.values())
+    
     def __init__(self, event_engine):
         """Constructor"""
-        super(CtpGateway, self).__init__(event_engine, "CTP")
+        super().__init__(event_engine, "CTP")
 
         self.td_api = CtpTdApi(self)
         self.md_api = CtpMdApi(self)
@@ -148,15 +151,16 @@ class CtpGateway(BaseGateway):
         brokerid = setting["经纪商代码"]
         td_address = setting["交易服务器"]
         md_address = setting["行情服务器"]
-        product_info = setting["产品名称"]
+        appid = setting["产品名称"]
         auth_code = setting["授权编码"]
+        product_info = setting["产品信息"]
         
         if not td_address.startswith("tcp://"):
             td_address = "tcp://" + td_address
         if not md_address.startswith("tcp://"):
             md_address = "tcp://" + md_address
         
-        self.td_api.connect(td_address, userid, password, brokerid, auth_code, product_info)
+        self.td_api.connect(td_address, userid, password, brokerid, auth_code, appid, product_info)
         self.md_api.connect(md_address, userid, password, brokerid)
         
         self.init_query()
@@ -229,13 +233,12 @@ class CtpMdApi(MdApi):
         
         self.userid = ""
         self.password = ""
-        self.brokerid = 0
+        self.brokerid = ""
     
     def onFrontConnected(self):
         """
         Callback when front server is connected.
         """
-        self.connect_status = True
         self.gateway.write_log("行情服务器连接成功")
         self.login()
 
@@ -243,9 +246,8 @@ class CtpMdApi(MdApi):
         """
         Callback when front server is disconnected.
         """
-        self.connect_status = False
         self.login_status = False
-        self.gateway.write_log(f"行情连接断开，原因{reason}")
+        self.gateway.write_log(f"行情服务器连接断开，原因{reason}")
 
     def onRspUserLogin(self, data: dict, error: dict, reqid: int, last: bool):
         """
@@ -258,7 +260,7 @@ class CtpMdApi(MdApi):
             for symbol in self.subscribed:
                 self.subscribeMarketData(symbol)
         else:
-            self.gateway.write_error("行情登录失败", error)
+            self.gateway.write_error("行情服务器登录失败", error)
     
     def onRspError(self, error: dict, reqid: int, last: bool):
         """
@@ -290,6 +292,7 @@ class CtpMdApi(MdApi):
             datetime=datetime.strptime(timestamp, "%Y%m%d %H:%M:%S.%f"),
             name=symbol_name_map[symbol],
             volume=data["Volume"],
+            open_interest=data["OpenInterest"],
             last_price=data["LastPrice"],
             limit_up=data["UpperLimitPrice"],
             limit_down=data["LowerLimitPrice"],
@@ -320,6 +323,8 @@ class CtpMdApi(MdApi):
             
             self.registerFront(address)
             self.init()
+
+            self.connect_status = True
         # If already connected, then login immediately.
         elif not self.login_status:
             self.login()
@@ -373,8 +378,9 @@ class CtpTdApi(TdApi):
         
         self.userid = ""
         self.password = ""
-        self.brokerid = 0
+        self.brokerid = ""
         self.auth_code = ""
+        self.appid = ""
         self.product_info = ""
         
         self.frontid = 0
@@ -387,8 +393,7 @@ class CtpTdApi(TdApi):
         
     def onFrontConnected(self):
         """"""
-        self.connect_status = True
-        self.gateway.write_log("交易连接成功")
+        self.gateway.write_log("交易服务器连接成功")
         
         if self.auth_code:
             self.authenticate()
@@ -397,18 +402,17 @@ class CtpTdApi(TdApi):
     
     def onFrontDisconnected(self, reason: int):
         """"""
-        self.connect_status = False
         self.login_status = False
-        self.gateway.write_log(f"交易连接断开，原因{reason}")        
+        self.gateway.write_log(f"交易服务器连接断开，原因{reason}")        
     
     def onRspAuthenticate(self, data: dict, error: dict, reqid: int, last: bool):
         """"""
         if not error['ErrorID']:
-            self.authStatus = True
-            self.writeLog("交易授权验证成功")
+            self.auth_staus = True
+            self.gateway.write_log("交易服务器授权验证成功")
             self.login()
         else:
-            self.gateway.write_error("交易授权验证失败", error)
+            self.gateway.write_error("交易服务器授权验证失败", error)
     
     def onRspUserLogin(self, data: dict, error: dict, reqid: int, last: bool):
         """"""
@@ -416,9 +420,9 @@ class CtpTdApi(TdApi):
             self.frontid = data["FrontID"]
             self.sessionid = data["SessionID"]
             self.login_status = True
-            self.gateway.write_log("交易登录成功")
+            self.gateway.write_log("交易服务器登录成功")
             
-            # Confirm settelment
+            # Confirm settlement
             req = {
                 "BrokerID": self.brokerid,
                 "InvestorID": self.userid
@@ -428,7 +432,7 @@ class CtpTdApi(TdApi):
         else:
             self.login_failed = True
             
-            self.gateway.write_error("交易登录失败", error)
+            self.gateway.write_error("交易服务器登录失败", error)
     
     def onRspOrderInsert(self, data: dict, error: dict, reqid: int, last: bool):
         """"""
@@ -443,7 +447,7 @@ class CtpTdApi(TdApi):
             exchange=exchange,
             orderid=orderid,
             direction=DIRECTION_CTP2VT[data["Direction"]],
-            offset=OFFSET_CTP2VT[data["CombOffsetFlag"]],
+            offset=OFFSET_CTP2VT.get(data["CombOffsetFlag"], Offset.NONE),
             price=data["LimitPrice"],
             volume=data["VolumeTotalOriginal"],
             status=Status.REJECTED,
@@ -487,11 +491,6 @@ class CtpTdApi(TdApi):
             )
             self.positions[key] = position
         
-        # Get contract size, return if size value not collected
-        size = symbol_size_map.get(position.symbol, None)
-        if not size:
-            return
-        
         # For SHFE position data update
         if position.exchange == Exchange.SHFE:
             if data["YdPosition"] and not data["TodayPosition"]:
@@ -499,6 +498,9 @@ class CtpTdApi(TdApi):
         # For other exchange position data update
         else:
             position.yd_volume = data["Position"] - data["TodayPosition"]
+        
+        # Get contract size (spread contract has no size value)
+        size = symbol_size_map.get(position.symbol, 0)
         
         # Calculate previous position cost
         cost = position.price * position.volume * size
@@ -508,7 +510,7 @@ class CtpTdApi(TdApi):
         position.pnl += data["PositionProfit"]
         
         # Calculate average position price
-        if position.volume:
+        if position.volume and size:
             cost += data["PositionCost"]
             position.price = cost / (position.volume * size)
         
@@ -526,6 +528,9 @@ class CtpTdApi(TdApi):
     
     def onRspQryTradingAccount(self, data: dict, error: dict, reqid: int, last: bool):
         """"""
+        if "AccountID" not in data:
+            return
+
         account = AccountData(
             accountid=data["AccountID"],
             balance=data["Balance"],
@@ -549,12 +554,15 @@ class CtpTdApi(TdApi):
                 product=product,
                 size=data["VolumeMultiple"],
                 pricetick=data["PriceTick"],
-                option_underlying=data["UnderlyingInstrID"],
-                option_type=OPTIONTYPE_CTP2VT.get(data["OptionsType"], None),
-                option_strike=data["StrikePrice"],
-                option_expiry=datetime.strptime(data["ExpireDate"], "%Y%m%d"),
                 gateway_name=self.gateway_name
             )
+            
+            # For option only
+            if contract.product == Product.OPTION:
+                contract.option_underlying = data["UnderlyingInstrID"],
+                contract.option_type = OPTIONTYPE_CTP2VT.get(data["OptionsType"], None),
+                contract.option_strike = data["StrikePrice"],
+                contract.option_expiry = datetime.strptime(data["ExpireDate"], "%Y%m%d"),
             
             self.gateway.on_contract(contract)
             
@@ -632,7 +640,16 @@ class CtpTdApi(TdApi):
         )
         self.gateway.on_trade(trade)        
     
-    def connect(self, address: str, userid: str, password: str, brokerid: int, auth_code: str, product_info: str):
+    def connect(
+        self, 
+        address: str, 
+        userid: str, 
+        password: str, 
+        brokerid: int, 
+        auth_code: str, 
+        appid: str,
+        product_info
+    ):
         """
         Start connection to server.
         """
@@ -640,6 +657,7 @@ class CtpTdApi(TdApi):
         self.password = password
         self.brokerid = brokerid
         self.auth_code = auth_code
+        self.appid = appid
         self.product_info = product_info
         
         if not self.connect_status:
@@ -651,19 +669,24 @@ class CtpTdApi(TdApi):
             
             self.registerFront(address)
             self.init()            
+
+            self.connect_status = True
         else:
             self.authenticate()
     
     def authenticate(self):
         """
-        Authenticate with auth_code and product_info.
+        Authenticate with auth_code and appid.
         """
         req = {
             "UserID": self.userid,
             "BrokerID": self.brokerid,
             "AuthCode": self.auth_code,
-            "ProductInfo": self.product_info
+            "AppID": self.appid
         }
+
+        if self.product_info:
+            req["UserProductInfo"] = self.product_info
         
         self.reqid += 1
         self.reqAuthenticate(req, self.reqid)
@@ -678,8 +701,12 @@ class CtpTdApi(TdApi):
         req = {
             "UserID": self.userid,
             "Password": self.password,
-            "BrokerID": self.brokerid
+            "BrokerID": self.brokerid,
+            "AppID": self.appid
         }
+
+        if self.product_info:
+            req["UserProductInfo"] = self.product_info
         
         self.reqid += 1
         self.reqUserLogin(req, self.reqid)
@@ -692,6 +719,7 @@ class CtpTdApi(TdApi):
         
         ctp_req = {
             "InstrumentID": req.symbol,
+            "ExchangeID": req.exchange.value,
             "LimitPrice": req.price,
             "VolumeTotalOriginal": int(req.volume),
             "OrderPriceType": ORDERTYPE_VT2CTP.get(req.type, ""),
@@ -736,7 +764,7 @@ class CtpTdApi(TdApi):
         
         ctp_req = {
             "InstrumentID": req.symbol,
-            "Exchange": req.exchange,
+            "ExchangeID": req.exchange.value,
             "OrderRef": order_ref,
             "FrontID": int(frontid),
             "SessionID": int(sessionid),

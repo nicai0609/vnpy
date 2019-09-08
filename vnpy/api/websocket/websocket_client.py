@@ -1,9 +1,8 @@
-# encoding: UTF-8
-
 import json
 import ssl
 import sys
 import traceback
+import socket
 from datetime import datetime
 from threading import Lock, Thread
 from time import sleep
@@ -48,14 +47,22 @@ class WebsocketClient(object):
 
         self.proxy_host = None
         self.proxy_port = None
+        self.ping_interval = 60     # seconds
+        self.header = {}
 
         # For debugging
         self._last_sent_text = None
         self._last_received_text = None
 
-    def init(self, host: str, proxy_host: str = "", proxy_port: int = 0):
-        """"""
+    def init(self, host: str, proxy_host: str = "", proxy_port: int = 0, ping_interval: int = 60, header: dict = None):
+        """
+        :param ping_interval: unit: seconds, type: int
+        """
         self.host = host
+        self.ping_interval = ping_interval  # seconds
+
+        if header:
+            self.header = header
 
         if proxy_host and proxy_port:
             self.proxy_host = proxy_host
@@ -79,8 +86,6 @@ class WebsocketClient(object):
     def stop(self):
         """
         Stop the client.
-
-        This function cannot be called from worker thread or callback function.
         """
         self._active = False
         self._disconnect()
@@ -88,6 +93,8 @@ class WebsocketClient(object):
     def join(self):
         """
         Wait till all threads finish.
+
+        This function cannot be called from worker thread or callback function.
         """
         self._ping_thread.join()
         self._worker_thread.join()
@@ -118,51 +125,55 @@ class WebsocketClient(object):
         if ws:
             ws._send_binary(data)
 
-    def _reconnect(self):
-        """"""
-        if self._active:
-            self._disconnect()
-            self._connect()
-
     def _create_connection(self, *args, **kwargs):
         """"""
         return websocket.create_connection(*args, **kwargs)
 
-    def _connect(self):
+    def _ensure_connection(self):
         """"""
-        self._ws = self._create_connection(
-            self.host,
-            sslopt={"cert_reqs": ssl.CERT_NONE},
-            http_proxy_host=self.proxy_host,
-            http_proxy_port=self.proxy_port,
-        )
-        self.on_connected()
+        triggered = False
+        with self._ws_lock:
+            if self._ws is None:
+                self._ws = self._create_connection(
+                    self.host,
+                    sslopt={"cert_reqs": ssl.CERT_NONE},
+                    http_proxy_host=self.proxy_host,
+                    http_proxy_port=self.proxy_port,
+                    header=self.header
+                )
+                triggered = True
+        if triggered:
+            self.on_connected()
 
     def _disconnect(self):
         """
         """
+        triggered = False
         with self._ws_lock:
             if self._ws:
-                self._ws.close()
+                ws: websocket.WebSocket = self._ws
                 self._ws = None
+
+                triggered = True
+        if triggered:
+            ws.close()
+            self.on_disconnected()
 
     def _run(self):
         """
         Keep running till stop is called.
         """
         try:
-            self._connect()
-
-            # todo: onDisconnect
             while self._active:
                 try:
+                    self._ensure_connection()
                     ws = self._ws
                     if ws:
                         text = ws.recv()
 
                         # ws object is closed when recv function is blocking
                         if not text:
-                            self._reconnect()
+                            self._disconnect()
                             continue
 
                         self._record_last_received_text(text)
@@ -175,18 +186,19 @@ class WebsocketClient(object):
 
                         self.on_packet(data)
                 # ws is closed before recv function is called
-                except websocket.WebSocketConnectionClosedException:
-                    self._reconnect()
+                # For socket.error, see Issue #1608
+                except (websocket.WebSocketConnectionClosedException, socket.error):
+                    self._disconnect()
 
                 # other internal exception raised in on_packet
                 except:  # noqa
                     et, ev, tb = sys.exc_info()
                     self.on_error(et, ev, tb)
-                    self._reconnect()
+                    self._disconnect()
         except:  # noqa
             et, ev, tb = sys.exc_info()
             self.on_error(et, ev, tb)
-            self._reconnect()
+        self._disconnect()
 
     @staticmethod
     def unpack_data(data: str):
@@ -205,8 +217,11 @@ class WebsocketClient(object):
             except:  # noqa
                 et, ev, tb = sys.exc_info()
                 self.on_error(et, ev, tb)
-                self._reconnect()
-            for i in range(60):
+
+                # self._run() will reconnect websocket
+                sleep(1)
+
+            for i in range(self.ping_interval):
                 if not self._active:
                     break
                 sleep(1)

@@ -1,19 +1,23 @@
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Callable
 from itertools import product
+from functools import lru_cache
+from time import time
 import multiprocessing
+import random
 
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pandas import DataFrame
+from deap import creator, base, tools, algorithms
 
 from vnpy.trader.constant import (Direction, Offset, Exchange, 
                                   Interval, Status)
-from vnpy.trader.database import DbBarData, DbTickData
-from vnpy.trader.object import OrderData, TradeData
-from vnpy.trader.utility import round_to_pricetick
+from vnpy.trader.database import database_manager
+from vnpy.trader.object import OrderData, TradeData, BarData, TickData
+from vnpy.trader.utility import round_to
 
 from .base import (
     BacktestingMode,
@@ -25,6 +29,8 @@ from .base import (
 from .template import CtaTemplate
 
 sns.set_style("whitegrid")
+creator.create("FitnessMax", base.Fitness, weights=(1.0,))
+creator.create("Individual", list, fitness=creator.FitnessMax)
 
 
 class OptimizationSetting:
@@ -78,6 +84,15 @@ class OptimizationSetting:
             settings.append(setting)
 
         return settings
+    
+    def generate_setting_ga(self):
+        """""" 
+        settings_ga = []
+        settings = self.generate_setting()     
+        for d in settings:            
+            param = [tuple(i) for i in d.items()]
+            settings_ga.append(param)
+        return settings_ga
 
 
 class BacktestingEngine:
@@ -102,8 +117,8 @@ class BacktestingEngine:
 
         self.strategy_class = None
         self.strategy = None
-        self.tick = None
-        self.bar = None
+        self.tick: TickData
+        self.bar: BarData
         self.datetime = None
 
         self.interval = None
@@ -166,7 +181,7 @@ class BacktestingEngine:
         """"""
         self.mode = mode
         self.vt_symbol = vt_symbol
-        self.interval = interval
+        self.interval = Interval(interval)
         self.rate = rate
         self.slippage = slippage
         self.size = size
@@ -196,30 +211,52 @@ class BacktestingEngine:
         """"""
         self.output("开始加载历史数据")
 
-        if self.mode == BacktestingMode.BAR:
-            s = (
-                DbBarData.select()
-                .where(
-                    (DbBarData.vt_symbol == self.vt_symbol) 
-                    & (DbBarData.interval == self.interval) 
-                    & (DbBarData.datetime >= self.start) 
-                    & (DbBarData.datetime <= self.end)
-                )
-                .order_by(DbBarData.datetime)
-            )
-            self.history_data = [db_bar.to_bar() for db_bar in s]
-        else:
-            s = (
-                DbTickData.select()
-                .where(
-                    (DbTickData.vt_symbol == self.vt_symbol) 
-                    & (DbTickData.datetime >= self.start) 
-                    & (DbTickData.datetime <= self.end)
-                )
-                .order_by(DbTickData.datetime)
-            )
-            self.history_data = [db_tick.to_tick() for db_tick in s]
+        if not self.end:
+            self.end = datetime.now()
 
+        if self.start >= self.end:
+            self.output("起始日期必须小于结束日期")    
+            return        
+
+        self.history_data.clear()       # Clear previously loaded history data
+
+        # Load 30 days of data each time and allow for progress update
+        progress_delta = timedelta(days=30)
+        total_delta = self.end - self.start
+
+        start = self.start
+        end = self.start + progress_delta
+        progress = 0
+
+        while start < self.end:
+            end = min(end, self.end)  # Make sure end time stays within set range
+            
+            if self.mode == BacktestingMode.BAR:
+                data = load_bar_data(
+                    self.symbol,
+                    self.exchange,
+                    self.interval,
+                    start,
+                    end
+                )
+            else:
+                data = load_tick_data(
+                    self.symbol,
+                    self.exchange,
+                    start,
+                    end
+                )
+
+            self.history_data.extend(data)
+            
+            progress += progress_delta / total_delta
+            progress = min(progress, 1)
+            progress_bar = "#" * int(progress * 10)
+            self.output(f"加载进度：{progress_bar} [{progress:.0%}]")
+            
+            start = end
+            end += progress_delta
+        
         self.output(f"历史数据加载完成，数据量：{len(self.history_data)}")
 
     def run_backtesting(self):
@@ -233,6 +270,8 @@ class BacktestingEngine:
 
         # Use the first [days] of history data for initializing strategy
         day_count = 0
+        ix = 0
+        
         for ix, data in enumerate(self.history_data):
             if self.datetime and data.datetime.day != self.datetime.day:
                 day_count += 1
@@ -293,13 +332,15 @@ class BacktestingEngine:
         self.output("逐日盯市盈亏计算完成")
         return self.daily_df
 
-    def calculate_statistics(self, df: DataFrame = None):
+    def calculate_statistics(self, df: DataFrame = None, output=True):
         """"""
         self.output("开始计算策略统计指标")
 
-        if not df:
+        # Check DataFrame input exterior
+        if df is None:
             df = self.daily_df
         
+        # Check for init DataFrame 
         if df is None:
             # Set all statistics to 0 if no trade.
             start_date = ""
@@ -325,6 +366,7 @@ class BacktestingEngine:
             daily_return = 0
             return_std = 0
             sharpe_ratio = 0
+            return_drawdown_ratio = 0
         else:
             # Calculate balance related time series data
             df["balance"] = df["net_pnl"].cumsum() + self.capital
@@ -373,38 +415,42 @@ class BacktestingEngine:
             else:
                 sharpe_ratio = 0
 
+            return_drawdown_ratio = -total_return / max_ddpercent
+
         # Output
-        self.output("-" * 30)
-        self.output(f"首个交易日：\t{start_date}")
-        self.output(f"最后交易日：\t{end_date}")
+        if output:
+            self.output("-" * 30)
+            self.output(f"首个交易日：\t{start_date}")
+            self.output(f"最后交易日：\t{end_date}")
 
-        self.output(f"总交易日：\t{total_days}")
-        self.output(f"盈利交易日：\t{profit_days}")
-        self.output(f"亏损交易日：\t{loss_days}")
+            self.output(f"总交易日：\t{total_days}")
+            self.output(f"盈利交易日：\t{profit_days}")
+            self.output(f"亏损交易日：\t{loss_days}")
 
-        self.output(f"起始资金：\t{self.capital:,.2f}")
-        self.output(f"结束资金：\t{end_balance:,.2f}")
+            self.output(f"起始资金：\t{self.capital:,.2f}")
+            self.output(f"结束资金：\t{end_balance:,.2f}")
 
-        self.output(f"总收益率：\t{total_return:,.2f}%")
-        self.output(f"年化收益：\t{annual_return:,.2f}%")
-        self.output(f"最大回撤: \t{max_drawdown:,.2f}")
-        self.output(f"百分比最大回撤: {max_ddpercent:,.2f}%")
+            self.output(f"总收益率：\t{total_return:,.2f}%")
+            self.output(f"年化收益：\t{annual_return:,.2f}%")
+            self.output(f"最大回撤: \t{max_drawdown:,.2f}")
+            self.output(f"百分比最大回撤: {max_ddpercent:,.2f}%")
 
-        self.output(f"总盈亏：\t{total_net_pnl:,.2f}")
-        self.output(f"总手续费：\t{total_commission:,.2f}")
-        self.output(f"总滑点：\t{total_slippage:,.2f}")
-        self.output(f"总成交金额：\t{total_turnover:,.2f}")
-        self.output(f"总成交笔数：\t{total_trade_count}")
+            self.output(f"总盈亏：\t{total_net_pnl:,.2f}")
+            self.output(f"总手续费：\t{total_commission:,.2f}")
+            self.output(f"总滑点：\t{total_slippage:,.2f}")
+            self.output(f"总成交金额：\t{total_turnover:,.2f}")
+            self.output(f"总成交笔数：\t{total_trade_count}")
 
-        self.output(f"日均盈亏：\t{daily_net_pnl:,.2f}")
-        self.output(f"日均手续费：\t{daily_commission:,.2f}")
-        self.output(f"日均滑点：\t{daily_slippage:,.2f}")
-        self.output(f"日均成交金额：\t{daily_turnover:,.2f}")
-        self.output(f"日均成交笔数：\t{daily_trade_count}")
+            self.output(f"日均盈亏：\t{daily_net_pnl:,.2f}")
+            self.output(f"日均手续费：\t{daily_commission:,.2f}")
+            self.output(f"日均滑点：\t{daily_slippage:,.2f}")
+            self.output(f"日均成交金额：\t{daily_turnover:,.2f}")
+            self.output(f"日均成交笔数：\t{daily_trade_count}")
 
-        self.output(f"日均收益率：\t{daily_return:,.2f}%")
-        self.output(f"收益标准差：\t{return_std:,.2f}%")
-        self.output(f"Sharpe Ratio：\t{sharpe_ratio:,.2f}")
+            self.output(f"日均收益率：\t{daily_return:,.2f}%")
+            self.output(f"收益标准差：\t{return_std:,.2f}%")
+            self.output(f"Sharpe Ratio：\t{sharpe_ratio:,.2f}")
+            self.output(f"收益回撤比：\t{return_drawdown_ratio:,.2f}")
 
         statistics = {
             "start_date": start_date,
@@ -412,6 +458,7 @@ class BacktestingEngine:
             "total_days": total_days,
             "profit_days": profit_days,
             "loss_days": loss_days,
+            "capital": self.capital,
             "end_balance": end_balance,
             "max_drawdown": max_drawdown,
             "max_ddpercent": max_ddpercent,
@@ -430,15 +477,18 @@ class BacktestingEngine:
             "daily_return": daily_return,
             "return_std": return_std,
             "sharpe_ratio": sharpe_ratio,
+            "return_drawdown_ratio": return_drawdown_ratio,
         }
 
         return statistics
 
     def show_chart(self, df: DataFrame = None):
         """"""
-        if not df:
+        # Check DataFrame input exterior        
+        if df is None:
             df = self.daily_df
-        
+
+        # Check for init DataFrame        
         if df is None:
             return
 
@@ -462,7 +512,7 @@ class BacktestingEngine:
 
         plt.show()
 
-    def run_optimization(self, optimization_setting: OptimizationSetting):
+    def run_optimization(self, optimization_setting: OptimizationSetting, output=True):
         """"""
         # Get optimization setting and target
         settings = optimization_setting.generate_setting()
@@ -505,11 +555,138 @@ class BacktestingEngine:
         result_values = [result.get() for result in results]
         result_values.sort(reverse=True, key=lambda result: result[1])
 
-        for value in result_values:
-            msg = f"参数：{value[0]}, 目标：{value[1]}"
-            self.output(msg)
+        if output:
+            for value in result_values:
+                msg = f"参数：{value[0]}, 目标：{value[1]}"
+                self.output(msg)
 
         return result_values
+
+    def run_ga_optimization(self, optimization_setting: OptimizationSetting, population_size=100, ngen_size=30, output=True):
+        """"""
+        # Get optimization setting and target
+        settings = optimization_setting.generate_setting_ga()
+        target_name = optimization_setting.target_name
+
+        if not settings:
+            self.output("优化参数组合为空，请检查")
+            return
+
+        if not target_name:
+            self.output("优化目标未设置，请检查")
+            return
+
+        # Define parameter generation function
+        def generate_parameter():
+            """"""
+            return random.choice(settings)
+        
+        def mutate_individual(individual, indpb):
+            """"""
+            size = len(individual)
+            paramlist = generate_parameter()
+            for i in range(size):
+                if random.random() < indpb:
+                    individual[i] = paramlist[i]
+            return individual,
+
+        # Create ga object function
+        global ga_target_name
+        global ga_strategy_class
+        global ga_setting
+        global ga_vt_symbol
+        global ga_interval
+        global ga_start
+        global ga_rate
+        global ga_slippage
+        global ga_size
+        global ga_pricetick
+        global ga_capital
+        global ga_end
+        global ga_mode
+
+        ga_target_name = target_name
+        ga_strategy_class = self.strategy_class
+        ga_setting = settings[0]
+        ga_vt_symbol = self.vt_symbol
+        ga_interval = self.interval
+        ga_start = self.start
+        ga_rate = self.rate
+        ga_slippage = self.slippage
+        ga_size = self.size
+        ga_pricetick = self.pricetick
+        ga_capital = self.capital
+        ga_end = self.end
+        ga_mode = self.mode
+
+        # Set up genetic algorithem
+        toolbox = base.Toolbox() 
+        toolbox.register("individual", tools.initIterate, creator.Individual, generate_parameter)                          
+        toolbox.register("population", tools.initRepeat, list, toolbox.individual)                                            
+        toolbox.register("mate", tools.cxTwoPoint)                                               
+        toolbox.register("mutate", mutate_individual, indpb=1)               
+        toolbox.register("evaluate", ga_optimize)                                                
+        toolbox.register("select", tools.selNSGA2)       
+
+        total_size = len(settings)
+        pop_size = population_size                      # number of individuals in each generation
+        lambda_ = pop_size                              # number of children to produce at each generation
+        mu = int(pop_size * 0.8)                        # number of individuals to select for the next generation
+
+        cxpb = 0.95         # probability that an offspring is produced by crossover    
+        mutpb = 1 - cxpb    # probability that an offspring is produced by mutation
+        ngen = ngen_size    # number of generation
+                
+        pop = toolbox.population(pop_size)      
+        hof = tools.ParetoFront()               # end result of pareto front
+
+        stats = tools.Statistics(lambda ind: ind.fitness.values)
+        np.set_printoptions(suppress=True)
+        stats.register("mean", np.mean, axis=0)
+        stats.register("std", np.std, axis=0)
+        stats.register("min", np.min, axis=0)
+        stats.register("max", np.max, axis=0)
+
+        # Multiprocessing is not supported yet.
+        # pool = multiprocessing.Pool(multiprocessing.cpu_count())
+        # toolbox.register("map", pool.map)
+
+        # Run ga optimization
+        self.output(f"参数优化空间：{total_size}")
+        self.output(f"每代族群总数：{pop_size}")
+        self.output(f"优良筛选个数：{mu}")
+        self.output(f"迭代次数：{ngen}")
+        self.output(f"交叉概率：{cxpb:.0%}")
+        self.output(f"突变概率：{mutpb:.0%}")
+
+        start = time()
+
+        algorithms.eaMuPlusLambda(
+            pop, 
+            toolbox, 
+            mu, 
+            lambda_, 
+            cxpb, 
+            mutpb, 
+            ngen, 
+            stats,
+            halloffame=hof
+        )    
+        
+        end = time()
+        cost = int((end - start))
+
+        self.output(f"遗传算法优化完成，耗时{cost}秒")
+        
+        # Return result list
+        results = []
+
+        for parameter_values in hof:
+            setting = dict(parameter_values)
+            target_value = ga_optimize(parameter_values)[0]
+            results.append((setting, target_value, {}))
+        
+        return results
 
     def update_daily_close(self, price: float):
         """"""
@@ -521,7 +698,7 @@ class BacktestingEngine:
         else:
             self.daily_results[d] = DailyResult(d, price)
 
-    def new_bar(self, bar: DbBarData):
+    def new_bar(self, bar: BarData):
         """"""
         self.bar = bar
         self.datetime = bar.datetime
@@ -532,7 +709,7 @@ class BacktestingEngine:
 
         self.update_daily_close(bar.close_price)
 
-    def new_tick(self, tick: DbTickData):
+    def new_tick(self, tick: TickData):
         """"""
         self.tick = tick
         self.datetime = tick.datetime
@@ -660,6 +837,7 @@ class BacktestingEngine:
                 status=Status.ALLTRADED,
                 gateway_name=self.gateway_name,
             )
+            order.datetime = self.datetime
 
             self.limit_orders[order.vt_orderid] = order
 
@@ -725,7 +903,7 @@ class BacktestingEngine:
         lock: bool
     ):
         """"""
-        price = round_to_pricetick(price, self.pricetick)
+        price = round_to(price, self.pricetick)
         if stop:
             vt_orderid = self.send_stop_order(direction, offset, price, volume)
         else:
@@ -775,9 +953,10 @@ class BacktestingEngine:
             offset=offset,
             price=price,
             volume=volume,
-            status=Status.NOTTRADED,
+            status=Status.SUBMITTING,
             gateway_name=self.gateway_name,
         )
+        order.datetime = self.datetime
 
         self.active_limit_orders[order.vt_orderid] = order
         self.limit_orders[order.vt_orderid] = order
@@ -835,6 +1014,12 @@ class BacktestingEngine:
         Send email to default receiver.
         """
         pass
+    
+    def sync_strategy_data(self, strategy: CtaTemplate):
+        """
+        Sync strategy data into json file.
+        """
+        pass
 
     def get_engine_type(self):
         """
@@ -853,6 +1038,24 @@ class BacktestingEngine:
         Output message of backtesting engine.
         """
         print(f"{datetime.now()}\t{msg}")
+
+    def get_all_trades(self):
+        """
+        Return all trade data of current backtesting result.
+        """
+        return list(self.trades.values())
+
+    def get_all_orders(self):
+        """
+        Return all limit order data of current backtesting result.
+        """
+        return list(self.limit_orders.values())
+
+    def get_all_daily_results(self):
+        """
+        Return all daily result data.
+        """
+        return list(self.daily_results.values())
 
 
 class DailyResult:
@@ -936,12 +1139,13 @@ def optimize(
     pricetick: float,
     capital: int,
     end: datetime,
-    mode: BacktestingMode,
+    mode: BacktestingMode
 ):
     """
     Function for running in multiprocessing.pool
     """
     engine = BacktestingEngine()
+    
     engine.set_parameters(
         vt_symbol=vt_symbol,
         interval=interval,
@@ -959,7 +1163,78 @@ def optimize(
     engine.load_data()
     engine.run_backtesting()
     engine.calculate_result()
-    statistics = engine.calculate_statistics()
+    statistics = engine.calculate_statistics(output=False)
 
     target_value = statistics[target_name]
     return (str(setting), target_value, statistics)
+
+
+@lru_cache(maxsize=1000000)
+def _ga_optimize(parameter_values: tuple):
+    """"""
+    setting = dict(parameter_values)
+
+    result = optimize(
+        ga_target_name,
+        ga_strategy_class,
+        setting,
+        ga_vt_symbol,
+        ga_interval,
+        ga_start,
+        ga_rate,
+        ga_slippage,
+        ga_size,
+        ga_pricetick,
+        ga_capital,
+        ga_end,
+        ga_mode
+    )
+    return (result[1],)
+
+
+def ga_optimize(parameter_values: list):
+    """"""
+    return _ga_optimize(tuple(parameter_values))
+
+
+@lru_cache(maxsize=999)
+def load_bar_data(
+    symbol: str,
+    exchange: Exchange,
+    interval: Interval,
+    start: datetime,
+    end: datetime
+):
+    """"""
+    return database_manager.load_bar_data(
+        symbol, exchange, interval, start, end
+    )
+
+
+@lru_cache(maxsize=999)
+def load_tick_data(
+    symbol: str,
+    exchange: Exchange,
+    start: datetime,
+    end: datetime
+):
+    """"""
+    return database_manager.load_tick_data(
+        symbol, exchange, start, end
+    )
+
+
+# GA related global value
+ga_end = None
+ga_mode = None
+ga_target_name = None
+ga_strategy_class = None
+ga_setting = None
+ga_vt_symbol = None
+ga_interval = None
+ga_start = None
+ga_rate = None
+ga_slippage = None
+ga_size = None
+ga_pricetick = None
+ga_capital = None

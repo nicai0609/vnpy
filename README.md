@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-    <img src ="https://img.shields.io/badge/version-2.0.1-blueviolet.svg"/>
+    <img src ="https://img.shields.io/badge/version-2.0.6-blueviolet.svg"/>
     <img src ="https://img.shields.io/badge/platform-windows|linux|macos-yellow.svg"/>
     <img src ="https://img.shields.io/badge/python-3.7-blue.svg" />
     <img src ="https://img.shields.io/travis/com/vnpy/vnpy/master.svg"/>
@@ -14,7 +14,15 @@
 
 vn.py是一套基于Python的开源量化交易系统开发框架，于2015年1月正式发布，在开源社区5年持续不断的贡献下一步步成长为全功能量化交易平台，目前国内外金融机构用户已经超过300家，包括：私募基金、证券自营和资管、期货资管和子公司、高校研究机构、自营交易公司、交易所、Token Fund等。
 
-2.0版本基于Python 3.7全新重构开发，目前功能还在逐步完善中。如需Python 2上的版本请点击：[长期支持版本v1.9.2 LTS](https://github.com/vnpy/vnpy/tree/v1.9.2-LTS)。
+全新的《vn.py全实战进阶》在线课程，已经在官方微信公众号[**vnpy-community**]上线，50节内容覆盖从策略设计开发、参数回测优化，到最终实盘自动交易的完整CTA量化业务流程。购买请扫描下方二维码关注后，点击菜单栏的【进阶课程】按钮即可：
+
+<p align="center">
+  <img src ="https://vnpy.oss-cn-shanghai.aliyuncs.com/vnpy_qr.jpg"/>
+</p>
+
+在使用vn.py进行二次开发（策略、模块等）的过程中有任何疑问，请查看[**vn.py项目文档**](https://www.vnpy.com/docs/cn/index.html)，如果无法解决请前往[**官方社区论坛**](https://www.vnpy.com/forum/)的【提问求助】板块寻求帮助，也欢迎在【经验分享】板块分享你的使用心得！
+
+2.0版本基于Python 3.7全新重构开发，如需Python 2上的版本请点击：[长期支持版本v1.9.2 LTS](https://github.com/vnpy/vnpy/tree/v1.9.2-LTS)。
 
 ## 功能特点
 
@@ -22,35 +30,85 @@ vn.py是一套基于Python的开源量化交易系统开发框架，于2015年1�
 
 2. 覆盖国内外所有交易品种的交易接口（vnpy.gateway）：
 
-    * CTP(ctp)：国内期货、期权
+    * 国内市场
 
-    * 宽睿(oes)：A股
+        * CTP(ctp)：国内期货、期权
 
-    * 富途证券(futu)：港股、美股
+        * CTP Mini(mini)：国内期货、期权
 
-    * 老虎证券(tiger)：全球证券、期货、期权、外汇等
+        * 飞马(femas)：国内期货
 
-    * Interactive Brokers(ib)：全球证券、期货、期权、外汇等
+        * 宽睿(oes)：国内证券（A股）
 
-    * BitMEX (bitmex)：数字货币期货、期权、永续合约
+        * 中泰XTP(xtp)：国内证券（A股）
+
+        * 华鑫奇点(tora)：国内证券（A股）
+
+    * 海外市场
+     
+        * 富途证券(futu)：港股、美股
+
+        * 老虎证券(tiger)：全球证券、期货、期权、外汇等
+
+        * Interactive Brokers(ib)：全球证券、期货、期权、外汇等
+
+        * 易盛9.0外盘(tap)：全球期货
+
+    * 数字货币
+
+        * BitMEX(bitmex)：数字货币期货、期权、永续合约
+
+        * OKEX合约(okexf)：数字货币期货
+
+        * 火币合约(hbdm)：数字货币期货
+
+        * 币安(binance)：数字货币现货
+
+        * OKEX(okex)：数字货币现货
+
+        * 火币(huobi)：数字货币现货
+
+        * Bitfinex(bitfinex)：数字货币现货
+
+        * 1Token(onetoken)：数字货币券商（现货、期货）
+
+    * 特殊应用
+    
+        * RPC服务(rpc)：跨进程通讯接口，用于分布式架构
 
 3. 开箱即用的各类量化策略交易应用（vnpy.app）：
 
     * cta_strategy：CTA策略引擎模块，在保持易用性的同时，允许用户针对CTA类策略运行过程中委托的报撤行为进行细粒度控制（降低交易滑点、实现高频策略）
 
+    * cta_backtester：CTA策略回测模块，无需使用Jupyter Notebook，直接使用图形界面直接进行策略回测分析、参数优化等相关工作
+
+    * algo_trading：算法交易模块，提供多种常用的智能交易算法：TWAP、Sniper、Iceberg、BestLimit等等，支持常用算法配置保存
+
+    * script_trader：脚本策略模块，针对多标的组合类交易策略设计，同时也可以直接在命令行中实现REPL指令形式的交易，不支持回测功能
+
+    * rpc_service：RPC服务模块，允许将某一VN Trader进程启动为服务端，作为统一的行情和交易路由通道，允许多客户端同时连接，实现多进程分布式系统
+
     * csv_loader：CSV历史数据加载器，用于加载CSV格式文件中的历史数据到平台数据库中，用于策略的回测研究以及实盘初始化等功能，支持自定义数据表头格式
+
+    * data_recorder：行情记录模块，基于图形界面进行配置，根据需求实时录制Tick或者K线行情到数据库中，用于策略回测或者实盘初始化
+
+    * risk_manager：风险管理模块，提供包括交易流控、下单数量、活动委托、撤单总数等规则的统计和限制，有效实现前端风控功能
 
 4. Python交易API接口封装（vnpy.api），提供上述交易接口的底层对接实现。
 
 5. 简洁易用的事件驱动引擎（vnpy.event），作为事件驱动型交易程序的核心。
 
-6. [社区论坛](http://www.vnpy.com)和[知乎专栏](http://zhuanlan.zhihu.com/vn-py)，内容包括vn.py项目的开发教程和Python在量化交易领域的应用研究等内容。
+6. 跨进程通讯标准组件（vnpy.rpc），用于实现分布式部署的复杂交易系统。
 
-7. 官方交流群262656087（QQ），管理严格（定期清除长期潜水的成员），入群费将捐赠给vn.py社区基金。
+7. Python高性能K线图表（vnpy.chart），支持大数据量图表显示以及实时数据更新功能。
+
+8. [社区论坛](http://www.vnpy.com)和[知乎专栏](http://zhuanlan.zhihu.com/vn-py)，内容包括vn.py项目的开发教程和Python在量化交易领域的应用研究等内容。
+
+9.  官方交流群262656087（QQ），管理严格（定期清除长期潜水的成员），入群费将捐赠给vn.py社区基金。
 
 ## 环境准备
 
-* 推荐使用vn.py团队为量化交易专门打造的Python发行版[VNConda-2.0.1-Windows-x86_64](https://conda.vnpy.com/VNConda-2.0.1-Windows-x86_64.exe)，内置了最新版的vn.py框架以及VN Station量化管理平台，无需手动安装
+* 推荐使用vn.py团队为量化交易专门打造的Python发行版[VNStudio-2.0.4](https://download.vnpy.com/vnstudio-2.0.4-r.exe)，内置了最新版的vn.py框架以及VN Station量化管理平台，无需手动安装
 * 支持的系统版本：Windows 7以上/Windows Server 2008以上/Ubuntu 18.04 LTS
 * 支持的Python版本：Python 3.7 64位（**注意必须是Python 3.7 64位版本**）
 
@@ -78,6 +136,7 @@ vn.py是一套基于Python的开源量化交易系统开发框架，于2015年1�
 4. 点击底部的**VN Trader Lite**按钮，开始你的交易！！！
 
 注意：
+
 * 在VN Trader的运行过程中请勿关闭VN Station（会自动退出）
 * 如需要灵活配置量化交易应用组件，请使用**VN Trader Pro**
 
@@ -92,6 +151,7 @@ from vnpy.trader.engine import MainEngine
 from vnpy.trader.ui import MainWindow, create_qapp
 from vnpy.gateway.ctp import CtpGateway
 from vnpy.app.cta_strategy import CtaStrategyApp
+from vnpy.app.cta_backtester import CtaBacktesterApp
 
 def main():
     """Start VN Trader"""
@@ -102,6 +162,7 @@ def main():
     
     main_engine.add_gateway(CtpGateway)
     main_engine.add_app(CtaStrategyApp)
+    main_engine.add_app(CtaBacktesterApp)
 
     main_window = MainWindow(main_engine, event_engine)
     main_window.showMaximized()
@@ -164,6 +225,7 @@ vn.py使用Github托管其源代码，如果希望贡献代码请使用github的
 
 
 ## 版权说明
+
 MIT
   
 

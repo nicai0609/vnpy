@@ -1,9 +1,11 @@
 """"""
 from abc import ABC
+from copy import copy
 from typing import Any, Callable
 
 from vnpy.trader.constant import Interval, Direction, Offset
 from vnpy.trader.object import BarData, TickData, OrderData, TradeData
+from vnpy.trader.utility import virtual
 
 from .base import StopOrder, EngineType
 
@@ -31,6 +33,9 @@ class CtaTemplate(ABC):
         self.trading = False
         self.pos = 0
 
+        # Copy a new variables list here to avoid duplicate insert when multiple 
+        # strategy instances are created with the same strategy class.
+        self.variables = copy(self.variables)
         self.variables.insert(0, "inited")
         self.variables.insert(1, "trading")
         self.variables.insert(2, "pos")
@@ -87,77 +92,85 @@ class CtaTemplate(ABC):
         }
         return strategy_data
 
+    @virtual
     def on_init(self):
         """
         Callback when strategy is inited.
         """
         pass
 
+    @virtual
     def on_start(self):
         """
         Callback when strategy is started.
         """
         pass
 
+    @virtual
     def on_stop(self):
         """
         Callback when strategy is stopped.
         """
         pass
 
+    @virtual
     def on_tick(self, tick: TickData):
         """
         Callback of new tick data update.
         """
         pass
 
+    @virtual
     def on_bar(self, bar: BarData):
         """
         Callback of new bar data update.
         """
         pass
 
+    @virtual
     def on_trade(self, trade: TradeData):
         """
         Callback of new trade data update.
         """
         pass
 
+    @virtual
     def on_order(self, order: OrderData):
         """
         Callback of new order data update.
         """
         pass
 
+    @virtual
     def on_stop_order(self, stop_order: StopOrder):
         """
         Callback of stop order update.
         """
         pass
 
-    def buy(self, price: float, volume: float, stop: bool = False):
+    def buy(self, price: float, volume: float, stop: bool = False, lock: bool = False):
         """
         Send buy order to open a long position.
         """
-        return self.send_order(Direction.LONG, Offset.OPEN, price, volume, stop)
+        return self.send_order(Direction.LONG, Offset.OPEN, price, volume, stop, lock)
 
-    def sell(self, price: float, volume: float, stop: bool = False):
+    def sell(self, price: float, volume: float, stop: bool = False, lock: bool = False):
         """
         Send sell order to close a long position.
         """
-        return self.send_order(Direction.SHORT, Offset.CLOSE, price, volume, stop)
+        return self.send_order(Direction.SHORT, Offset.CLOSE, price, volume, stop, lock)
 
-    def short(self, price: float, volume: float, stop: bool = False):
+    def short(self, price: float, volume: float, stop: bool = False, lock: bool = False):
         """
         Send short order to open as short position.
         """
-        return self.send_order(Direction.SHORT, Offset.OPEN, price, volume, stop)
+        return self.send_order(Direction.SHORT, Offset.OPEN, price, volume, stop, lock)
 
-    def cover(self, price: float, volume: float, stop: bool = False):
+    def cover(self, price: float, volume: float, stop: bool = False, lock: bool = False):
         """
         Send cover order to close a short position.
         """
-        return self.send_order(Direction.LONG, Offset.CLOSE, price, volume, stop)
+        return self.send_order(Direction.LONG, Offset.CLOSE, price, volume, stop, lock)
 
     def send_order(
         self,
@@ -197,8 +210,7 @@ class CtaTemplate(ABC):
         """
         Write a log message.
         """
-        if self.inited:
-            self.cta_engine.write_log(msg, self)
+        self.cta_engine.write_log(msg, self)
 
     def get_engine_type(self):
         """
@@ -255,12 +267,14 @@ class CtaSignal(ABC):
         """"""
         self.signal_pos = 0
 
+    @virtual
     def on_tick(self, tick: TickData):
         """
         Callback of new tick data update.
         """
         pass
 
+    @virtual
     def on_bar(self, bar: BarData):
         """
         Callback of new bar data update.
@@ -292,6 +306,7 @@ class TargetPosTemplate(CtaTemplate):
         )
         self.variables.append("target_pos")
 
+    @virtual
     def on_tick(self, tick: TickData):
         """
         Callback of new tick data update.
@@ -301,12 +316,14 @@ class TargetPosTemplate(CtaTemplate):
         if self.trading:
             self.trade()
 
+    @virtual
     def on_bar(self, bar: BarData):
         """
         Callback of new bar data update.
         """
         self.last_bar = bar
 
+    @virtual
     def on_order(self, order: OrderData):
         """
         Callback of new order data update.

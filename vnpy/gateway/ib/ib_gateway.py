@@ -4,7 +4,7 @@ Please install ibapi from Interactive Brokers github page.
 from copy import copy
 from datetime import datetime
 from queue import Empty
-from threading import Thread
+from threading import Thread, Condition
 
 from ibapi import comm
 from ibapi.client import EClient
@@ -16,6 +16,7 @@ from ibapi.order_state import OrderState
 from ibapi.ticktype import TickType
 from ibapi.wrapper import EWrapper
 from ibapi.errors import BAD_LENGTH
+from ibapi.common import BarData as IbBarData
 
 from vnpy.trader.gateway import BaseGateway
 from vnpy.trader.object import (
@@ -25,9 +26,11 @@ from vnpy.trader.object import (
     PositionData,
     AccountData,
     ContractData,
+    BarData,
     OrderRequest,
     CancelRequest,
-    SubscribeRequest
+    SubscribeRequest,
+    HistoryRequest
 )
 from vnpy.trader.constant import (
     Product,
@@ -37,6 +40,7 @@ from vnpy.trader.constant import (
     Currency,
     Status,
     OptionType,
+    Interval
 )
 
 ORDERTYPE_VT2IB = {OrderType.LIMIT: "LMT", OrderType.MARKET: "MKT"}
@@ -60,11 +64,14 @@ EXCHANGE_VT2IB = {
 EXCHANGE_IB2VT = {v: k for k, v in EXCHANGE_VT2IB.items()}
 
 STATUS_IB2VT = {
-    "Submitted": Status.NOTTRADED,
-    "Filled": Status.ALLTRADED,
-    "Cancelled": Status.CANCELLED,
+    "ApiPending": Status.SUBMITTING,
     "PendingSubmit": Status.SUBMITTING,
     "PreSubmitted": Status.NOTTRADED,
+    "Submitted": Status.NOTTRADED,
+    "ApiCancelled": Status.CANCELLED,
+    "Cancelled": Status.CANCELLED,
+    "Filled": Status.ALLTRADED,
+    "Inactive": Status.REJECTED,
 }
 
 PRODUCT_VT2IB = {
@@ -106,6 +113,12 @@ ACCOUNTFIELD_IB2VT = {
     "MaintMarginReq": "margin",
 }
 
+INTERVAL_VT2IB = {
+    Interval.MINUTE: "1 min",
+    Interval.HOUR: "1 hour",
+    Interval.DAILY: "1 day",
+}
+
 
 class IbGateway(BaseGateway):
     """"""
@@ -115,6 +128,8 @@ class IbGateway(BaseGateway):
         "TWS端口": 7497,
         "客户号": 1
     }
+
+    exchanges = list(EXCHANGE_VT2IB.keys())
 
     def __init__(self, event_engine):
         """"""
@@ -168,6 +183,10 @@ class IbGateway(BaseGateway):
         """
         pass
 
+    def query_history(self, req: HistoryRequest):
+        """"""
+        return self.api.query_history(req)
+
 
 class IbApi(EWrapper):
     """"""
@@ -190,6 +209,10 @@ class IbApi(EWrapper):
         self.contracts = {}
 
         self.tick_exchange = {}
+
+        self.history_req = None
+        self.history_condition = Condition()
+        self.history_buf = []
 
         self.client = IbClient(self)
         self.thread = Thread(target=self.client.run)
@@ -333,8 +356,12 @@ class IbApi(EWrapper):
 
         orderid = str(orderId)
         order = self.orders.get(orderid, None)
-        order.status = STATUS_IB2VT[status]
         order.traded = filled
+
+        # To filter PendingCancel status
+        order_status = STATUS_IB2VT.get(status, None)
+        if order_status:
+            order.status = order_status
 
         self.gateway.on_order(copy(order))
 
@@ -414,6 +441,18 @@ class IbApi(EWrapper):
             accountName,
         )
 
+        if contract.exchange:
+            exchange = EXCHANGE_IB2VT.get(contract.exchange, None)
+        elif contract.primaryExchange:
+            exchange = EXCHANGE_IB2VT.get(contract.primaryExchange, None)
+        else:
+            exchange = Exchange.SMART   # Use smart routing for default
+
+        if not exchange:
+            msg = f"存在不支持的交易所持仓{contract.conId} {contract.exchange} {contract.primaryExchange}"
+            self.gateway.write_log(msg)
+            return
+
         ib_size = contract.multiplier
         if not ib_size:
             ib_size = 1
@@ -421,7 +460,7 @@ class IbApi(EWrapper):
 
         pos = PositionData(
             symbol=contract.conId,
-            exchange=EXCHANGE_IB2VT.get(contract.exchange, contract.exchange),
+            exchange=exchange,
             direction=Direction.NET,
             volume=position,
             price=price,
@@ -460,6 +499,7 @@ class IbApi(EWrapper):
             size=ib_size,
             pricetick=contractDetails.minTick,
             net_position=True,
+            history_data=True,
             gateway_name=self.gateway_name,
         )
 
@@ -498,6 +538,35 @@ class IbApi(EWrapper):
 
         for account_code in accountsList.split(","):
             self.client.reqAccountUpdates(True, account_code)
+
+    def historicalData(self, reqId: int, ib_bar: IbBarData):
+        """
+        Callback of history data update.
+        """
+        dt = datetime.strptime(ib_bar.date, "%Y%m%d %H:%M:%S")
+
+        bar = BarData(
+            symbol=self.history_req.symbol,
+            exchange=self.history_req.exchange,
+            datetime=dt,
+            interval=self.history_req.interval,
+            volume=ib_bar.volume,
+            open_price=ib_bar.open,
+            high_price=ib_bar.high,
+            low_price=ib_bar.low,
+            close_price=ib_bar.close,
+            gateway_name=self.gateway_name
+        )
+
+        self.history_buf.append(bar)
+
+    def historicalDataEnd(self, reqId: int, start: str, end: str):
+        """
+        Callback of history data finished.
+        """
+        self.history_condition.acquire()
+        self.history_condition.notify()
+        self.history_condition.release()
 
     def connect(self, host: str, port: int, clientid: int):
         """
@@ -598,6 +667,56 @@ class IbApi(EWrapper):
             return
 
         self.client.cancelOrder(int(req.orderid))
+
+    def query_history(self, req: HistoryRequest):
+        """"""
+        self.history_req = req
+
+        self.reqid += 1
+
+        ib_contract = Contract()
+        ib_contract.conId = str(req.symbol)
+        ib_contract.exchange = EXCHANGE_VT2IB[req.exchange]
+
+        if req.end:
+            end = req.end
+            end_str = end.strftime("%Y%m%d %H:%M:%S")
+        else:
+            end = datetime.now()
+            end_str = ""
+
+        delta = end - req.start
+        days = min(delta.days, 180)     # IB only provides 6-month data
+        duration = f"{days} D"
+        bar_size = INTERVAL_VT2IB[req.interval]
+
+        if req.exchange == Exchange.IDEALPRO:
+            bar_type = "MIDPOINT"
+        else:
+            bar_type = "TRADES"
+
+        self.client.reqHistoricalData(
+            self.reqid,
+            ib_contract,
+            end_str,
+            duration,
+            bar_size,
+            bar_type,
+            1,
+            1,
+            False,
+            []
+        )
+
+        self.history_condition.acquire()    # Wait for async data return
+        self.history_condition.wait()
+        self.history_condition.release()
+
+        history = self.history_buf
+        self.history_buf = []       # Create new buffer list
+        self.history_req = None
+
+        return history
 
 
 class IbClient(EClient):
